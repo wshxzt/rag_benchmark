@@ -4,10 +4,13 @@ Query Vertex AI Search for each BEIR test query.
 Document IDs returned by the API are the original BEIR doc IDs (set at ingest time),
 so no id_map is needed.
 """
+import concurrent.futures
 import time
+
 from google.api_core.client_options import ClientOptions
 from google.cloud import discoveryengine_v1 as discoveryengine
 from tqdm import tqdm
+
 import config
 
 
@@ -20,15 +23,16 @@ def _client_options():
     return ClientOptions(api_endpoint=endpoint)
 
 
-def run_queries(queries: dict, top_k: int = 10) -> tuple:
+def run_queries(queries: dict, top_k: int = 10, max_workers: int = 32) -> tuple:
     """
     Args:
-        queries: {query_id: query_text}
-        top_k:   number of results to retrieve
+        queries:     {query_id: query_text}
+        top_k:       number of results to retrieve
+        max_workers: thread pool size for concurrent queries
 
     Returns:
         results:   {query_id: {beir_doc_id: score}}
-        latencies: {query_id: float}  — seconds
+        latencies: {query_id: float}  — seconds per query (individual API call time)
     """
     client = discoveryengine.SearchServiceClient(client_options=_client_options())
     serving_config = (
@@ -37,19 +41,15 @@ def run_queries(queries: dict, top_k: int = 10) -> tuple:
         f"/servingConfigs/default_config"
     )
 
-    results = {}
-    latencies = {}
-
-    for query_id, query_text in tqdm(queries.items(), desc="Vertex Search queries"):
+    def _query_one(query_id, query_text):
         request = discoveryengine.SearchRequest(
             serving_config=serving_config,
             query=query_text,
             page_size=top_k,
         )
         t0 = time.perf_counter()
-        page_result = client.search(request)
-        search_results = list(page_result)
-        latencies[query_id] = time.perf_counter() - t0
+        search_results = list(client.search(request))
+        latency = time.perf_counter() - t0
 
         ranked = {}
         for i, result in enumerate(search_results[:top_k]):
@@ -60,7 +60,23 @@ def run_queries(queries: dict, top_k: int = 10) -> tuple:
                 else 1.0 / (i + 1)
             )
             ranked[doc_id] = score
+        return query_id, ranked, latency
 
-        results[query_id] = ranked
+    results = {}
+    latencies = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_query_one, qid, qtxt): qid
+            for qid, qtxt in queries.items()
+        }
+        for future in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(futures),
+            desc="Vertex Search queries",
+        ):
+            query_id, ranked, latency = future.result()
+            results[query_id] = ranked
+            latencies[query_id] = latency
 
     return results, latencies

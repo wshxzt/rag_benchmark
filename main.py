@@ -7,6 +7,7 @@ Usage:
     python main.py --skip-ingest   # skip ingest if already done
 """
 import argparse
+import concurrent.futures
 import json
 import os
 
@@ -63,21 +64,42 @@ def main(skip_ingest: bool = False):
         rag_corpus_name = rag_ingest.get_or_create_corpus()
         vs2_collection  = vs2_ingest.get_or_create_collection()
 
-    # ── 3. Query ──────────────────────────────────────────────────────────────
-    print("\n=== 3a. Querying: Vertex AI RAG Engine ===")
+    # ── 3. Query (all 4 systems in parallel) ─────────────────────────────────
+    print("\n=== 3. Querying all systems in parallel ===")
     id_map = json.load(open(ID_MAP_PATH))
-    rag_results, rag_latencies = rag_query.run_queries(
-        queries, rag_corpus_name, id_map, top_k=10
-    )
 
-    print("\n=== 3b. Querying: Vertex AI Search ===")
-    vs_results, vs_latencies = vs_query.run_queries(queries, top_k=10)
+    def _run_rag():
+        return rag_query.run_queries(queries, rag_corpus_name, id_map, top_k=10)
 
-    print("\n=== 3c. Querying: Vector Search 1.0 ===")
-    vs1_results, vs1_latencies = vs1_query.run_queries(queries, top_k=10)
+    def _run_vs():
+        return vs_query.run_queries(queries, top_k=10)
 
-    print("\n=== 3d. Querying: Vector Search 2.0 ===")
-    vs2_results, vs2_latencies = vs2_query.run_queries(queries, top_k=10)
+    def _run_vs1():
+        return vs1_query.run_queries(queries, top_k=10)
+
+    def _run_vs2():
+        return vs2_query.run_queries(queries, top_k=10)
+
+    system_fns = {
+        "rag":  _run_rag,
+        "vs":   _run_vs,
+        "vs1":  _run_vs1,
+        "vs2":  _run_vs2,
+    }
+
+    system_results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fn): name for name, fn in system_fns.items()}
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            results_i, latencies_i = future.result()
+            system_results[name] = (results_i, latencies_i)
+            print(f"  [{name}] done")
+
+    rag_results,  rag_latencies  = system_results["rag"]
+    vs_results,   vs_latencies   = system_results["vs"]
+    vs1_results,  vs1_latencies  = system_results["vs1"]
+    vs2_results,  vs2_latencies  = system_results["vs2"]
 
     # ── 4. Evaluate ───────────────────────────────────────────────────────────
     print("\n=== 4. Evaluating ===")
