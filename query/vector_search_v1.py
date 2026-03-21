@@ -29,7 +29,10 @@ def _get_endpoint() -> aiplatform.MatchingEngineIndexEndpoint:
     )
     if not existing:
         raise RuntimeError(f"No endpoint found with display_name={config.VS1_ENDPOINT_DISPLAY_NAME}")
-    return existing[0]
+    # Re-initialize by resource name to ensure _public_match_client is set up
+    return aiplatform.MatchingEngineIndexEndpoint(
+        index_endpoint_name=existing[0].resource_name
+    )
 
 
 def _embed_queries(query_texts: list[str]) -> list[list[float]]:

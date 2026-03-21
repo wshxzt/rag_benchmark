@@ -7,6 +7,7 @@ all documents. No manual embedding generation or endpoint deployment required.
 from tqdm import tqdm
 from google.cloud import vectorsearch_v1beta as vs
 import config
+from utils.batching import dynamic_batches
 
 
 def _vs_client():
@@ -69,13 +70,16 @@ def get_or_create_collection() -> str:
     return collection_path
 
 
-def ingest(corpus: dict, collection_path: str, batch_size: int = 5):
-    """Batch-insert all docs. Server auto-generates embeddings via text-embedding-004."""
+def ingest(corpus: dict, collection_path: str):
+    """Batch-insert all docs using dynamic token-aware batching.
+    Server auto-generates embeddings via text-embedding-004."""
     client = _do_client()
-    docs = list(corpus.items())
+    docs   = list(corpus.items())
+    texts  = [f"{d.get('title', '')}\n\n{d['text']}" for _, d in docs]
+    batches = dynamic_batches(texts)
 
-    for i in tqdm(range(0, len(docs), batch_size), desc="  Inserting data objects"):
-        batch = docs[i : i + batch_size]
+    for idx_batch in tqdm(batches, desc="  Inserting data objects"):
+        batch = [docs[i] for i in idx_batch]
         create_requests = [
             vs.CreateDataObjectRequest(
                 parent=collection_path,
@@ -84,7 +88,7 @@ def ingest(corpus: dict, collection_path: str, batch_size: int = 5):
                     data={"title": doc.get("title", ""), "text": doc["text"]}
                 ),
             )
-            for doc_id, doc in batch
+            for doc_id, doc in batch  # type: ignore[assignment]
         ]
         try:
             client.batch_create_data_objects(
