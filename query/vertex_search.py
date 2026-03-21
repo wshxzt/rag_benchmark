@@ -8,6 +8,7 @@ import concurrent.futures
 import time
 
 from google.api_core.client_options import ClientOptions
+from google.api_core.exceptions import ResourceExhausted
 from google.cloud import discoveryengine_v1 as discoveryengine
 from tqdm import tqdm
 
@@ -23,7 +24,7 @@ def _client_options():
     return ClientOptions(api_endpoint=endpoint)
 
 
-def run_queries(queries: dict, top_k: int = 10, max_workers: int = 32) -> tuple:
+def run_queries(queries: dict, top_k: int = 10, max_workers: int = 8) -> tuple:
     """
     Args:
         queries:     {query_id: query_text}
@@ -47,9 +48,19 @@ def run_queries(queries: dict, top_k: int = 10, max_workers: int = 32) -> tuple:
             query=query_text,
             page_size=top_k,
         )
-        t0 = time.perf_counter()
-        search_results = list(client.search(request))
-        latency = time.perf_counter() - t0
+        # Retry on quota errors with exponential backoff
+        delay = 2.0
+        for attempt in range(6):
+            try:
+                t0 = time.perf_counter()
+                search_results = list(client.search(request))
+                latency = time.perf_counter() - t0
+                break
+            except ResourceExhausted:
+                if attempt == 5:
+                    raise
+                time.sleep(delay)
+                delay *= 2
 
         ranked = {}
         for i, result in enumerate(search_results[:top_k]):
