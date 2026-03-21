@@ -4,7 +4,8 @@ Dataset: BEIR/scifact
 
 Usage:
     python main.py
-    python main.py --skip-ingest   # skip ingest if already done
+    python main.py --skip-ingest          # skip ingest if already done
+    python main.py --skip-ingest --skip-generate  # skip answer gen + autorater
 """
 import argparse
 import concurrent.futures
@@ -16,7 +17,9 @@ from tabulate import tabulate
 
 import config
 from data.download import download_and_load
+from evaluate.autorater import avg_scores, rate_answers
 from evaluate.metrics import compute_avg_latency, compute_metrics
+from generate.answer import generate_answers
 from ingest import rag_engine as rag_ingest
 from ingest import vector_search_v1 as vs1_ingest
 from ingest import vector_search_v1_gemini_chunking as vs1gc_ingest
@@ -31,8 +34,77 @@ from query import vertex_search as vs_query
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
 ID_MAP_PATH = os.path.join(config.RESULTS_DIR, "rag_engine_id_map.json")
 
+# ── Per-engine answer generation prompts ──────────────────────────────────────
+# Each prompt reflects how that engine retrieves and what kind of context it returns.
 
-def main(skip_ingest: bool = False):
+_RAG_PROMPT = """\
+You are a scientific research assistant backed by a RAG (Retrieval-Augmented Generation) system.
+The passages below were retrieved from a scientific corpus via semantic chunking.
+Answer the question using only information present in these passages. Be concise.
+
+Question: {query}
+
+Retrieved passages:
+{context}
+
+Answer:\
+"""
+
+_VS_PROMPT = """\
+You are a scientific expert assistant. The documents below were surfaced by a \
+full-text search engine ranked by relevance.
+Answer the question using only information present in these documents. Be concise.
+
+Question: {query}
+
+Search results:
+{context}
+
+Answer:\
+"""
+
+_VS1_PROMPT = """\
+You are a scientific assistant. The documents below were retrieved by dense \
+vector similarity search on full-document embeddings.
+Answer the question using only information present in these documents. Be concise.
+
+Question: {query}
+
+Retrieved documents:
+{context}
+
+Answer:\
+"""
+
+_VS1GC_PROMPT = """\
+You are a scientific assistant. The documents below were retrieved by dense vector \
+search on 512-character text chunks; the best-matching chunk from each document \
+was used to rank the documents.
+Answer the question using only information present in these documents. Be concise.
+
+Question: {query}
+
+Retrieved documents (ranked by best chunk match):
+{context}
+
+Answer:\
+"""
+
+_VS2_PROMPT = """\
+You are a scientific assistant. The documents below were retrieved by semantic \
+vector search using an auto-embedding service.
+Answer the question using only information present in these documents. Be concise.
+
+Question: {query}
+
+Semantically retrieved documents:
+{context}
+
+Answer:\
+"""
+
+
+def main(skip_ingest: bool = False, skip_generate: bool = False):
     # ── 1. Download ───────────────────────────────────────────────────────────
     print("=== 1. Downloading BEIR/scifact ===")
     corpus, queries, qrels = download_and_load()
@@ -69,7 +141,7 @@ def main(skip_ingest: bool = False):
         rag_corpus_name = rag_ingest.get_or_create_corpus()
         vs2_collection  = vs2_ingest.get_or_create_collection()
 
-    # ── 3. Query (all 4 systems in parallel) ─────────────────────────────────
+    # ── 3. Query (all 5 systems in parallel) ─────────────────────────────────
     print("\n=== 3. Querying all systems in parallel ===")
     id_map = json.load(open(ID_MAP_PATH))
 
@@ -111,8 +183,8 @@ def main(skip_ingest: bool = False):
     vs1gc_results, vs1gc_latencies = system_results["vs1gc"]
     vs2_results,   vs2_latencies   = system_results["vs2"]
 
-    # ── 4. Evaluate ───────────────────────────────────────────────────────────
-    print("\n=== 4. Evaluating ===")
+    # ── 4. Retrieval evaluation ───────────────────────────────────────────────
+    print("\n=== 4. Evaluating retrieval metrics ===")
     rag_metrics   = compute_metrics(qrels, rag_results,   config.K_VALUES)
     vs_metrics    = compute_metrics(qrels, vs_results,    config.K_VALUES)
     vs1_metrics   = compute_metrics(qrels, vs1_results,   config.K_VALUES)
@@ -125,13 +197,52 @@ def main(skip_ingest: bool = False):
     vs1gc_metrics["Avg Latency (ms)"] = compute_avg_latency(vs1gc_latencies)
     vs2_metrics["Avg Latency (ms)"]   = compute_avg_latency(vs2_latencies)
 
-    # ── 5. Print & Save ───────────────────────────────────────────────────────
+    # ── 5. Answer generation + LLM autorater ─────────────────────────────────
+    if not skip_generate:
+        systems_for_gen = [
+            ("rag",   rag_results,   _RAG_PROMPT,   rag_metrics),
+            ("vs",    vs_results,    _VS_PROMPT,    vs_metrics),
+            ("vs1",   vs1_results,   _VS1_PROMPT,   vs1_metrics),
+            ("vs1gc", vs1gc_results, _VS1GC_PROMPT, vs1gc_metrics),
+            ("vs2",   vs2_results,   _VS2_PROMPT,   vs2_metrics),
+        ]
+
+        for name, results, prompt_tmpl, metrics in systems_for_gen:
+            print(f"\n=== 5. Answer generation + autorater: {name} ===")
+
+            print("  Generating answers ...")
+            answers = generate_answers(
+                queries=queries,
+                results=results,
+                corpus=corpus,
+                prompt_template=prompt_tmpl,
+            )
+
+            print("  Rating answers ...")
+            ratings = rate_answers(
+                queries=queries,
+                answers=answers,
+                results=results,
+                corpus=corpus,
+            )
+
+            scores = avg_scores(ratings)
+            metrics["Faithfulness (1-5)"] = scores["Faithfulness"]
+            metrics["Relevance (1-5)"]    = scores["Relevance"]
+
+            # Save answers for inspection
+            answers_path = os.path.join(config.RESULTS_DIR, f"answers_{name}.json")
+            with open(answers_path, "w") as f:
+                json.dump(answers, f, indent=2)
+            print(f"  Answers saved to {answers_path}")
+
+    # ── 6. Print & Save ───────────────────────────────────────────────────────
     rows = [
-        {"System": "RAG Engine",                    **rag_metrics},
-        {"System": "Vertex Search",                 **vs_metrics},
-        {"System": "Vector Search 1.0",             **vs1_metrics},
-        {"System": "Vector Search 1.0 GC",          **vs1gc_metrics},
-        {"System": "Vector Search 2.0",             **vs2_metrics},
+        {"System": "RAG Engine",        **rag_metrics},
+        {"System": "Vertex Search",     **vs_metrics},
+        {"System": "Vector Search 1.0", **vs1_metrics},
+        {"System": "Vector Search 1.0 GC", **vs1gc_metrics},
+        {"System": "Vector Search 2.0", **vs2_metrics},
     ]
     df = pd.DataFrame(rows).set_index("System")
 
@@ -149,5 +260,10 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip ingest steps (use if corpus/data store already populated)",
     )
+    parser.add_argument(
+        "--skip-generate",
+        action="store_true",
+        help="Skip answer generation and LLM autorater",
+    )
     args = parser.parse_args()
-    main(skip_ingest=args.skip_ingest)
+    main(skip_ingest=args.skip_ingest, skip_generate=args.skip_generate)
