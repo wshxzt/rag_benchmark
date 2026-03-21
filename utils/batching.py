@@ -12,10 +12,19 @@ MAX_TOKENS_PER_BATCH = 18000  # safely under the 20k token limit per batch
 MAX_ITEMS_PER_BATCH  = 250    # hard API limit: 250 instances per prediction call
 
 
-def dynamic_batches(texts: list[str]) -> list[list[int]]:
+def dynamic_batches(
+    texts: list[str],
+    max_tokens: int = MAX_TOKENS_PER_BATCH,
+) -> list[list[int]]:
     """
     Returns lists of indices into `texts`, grouped so that each batch stays
-    under both MAX_TOKENS_PER_BATCH and MAX_ITEMS_PER_BATCH.
+    under both max_tokens and MAX_ITEMS_PER_BATCH.
+
+    Args:
+        texts:      list of input strings
+        max_tokens: token budget per batch (default MAX_TOKENS_PER_BATCH=18000).
+                    Pass a lower value (e.g. 15000) when working with short chunks
+                    where the 4 chars/token estimate is less accurate.
 
     Example:
         for idx_batch in dynamic_batches(texts):
@@ -29,7 +38,7 @@ def dynamic_batches(texts: list[str]) -> list[list[int]]:
     for i, text in enumerate(texts):
         estimated = len(text) / CHARS_PER_TOKEN
         if current and (
-            current_tokens + estimated > MAX_TOKENS_PER_BATCH
+            current_tokens + estimated > max_tokens
             or len(current) >= MAX_ITEMS_PER_BATCH
         ):
             batches.append(current)

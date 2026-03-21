@@ -18,13 +18,15 @@ import config
 from data.download import download_and_load
 from evaluate.metrics import compute_avg_latency, compute_metrics
 from ingest import rag_engine as rag_ingest
-from ingest import vertex_search as vs_ingest
 from ingest import vector_search_v1 as vs1_ingest
+from ingest import vector_search_v1_gemini_chunking as vs1gc_ingest
 from ingest import vector_search_v2 as vs2_ingest
+from ingest import vertex_search as vs_ingest
 from query import rag_engine as rag_query
-from query import vertex_search as vs_query
 from query import vector_search_v1 as vs1_query
+from query import vector_search_v1_gemini_chunking as vs1gc_query
 from query import vector_search_v2 as vs2_query
+from query import vertex_search as vs_query
 
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
 ID_MAP_PATH = os.path.join(config.RESULTS_DIR, "rag_engine_id_map.json")
@@ -56,7 +58,10 @@ def main(skip_ingest: bool = False):
         print("\n=== 2c. Ingesting: Vector Search 1.0 ===")
         vs1_ingest.ingest(corpus)
 
-        print("\n=== 2d. Ingesting: Vector Search 2.0 ===")
+        print("\n=== 2d. Ingesting: Vector Search 1.0 + Gemini Chunking ===")
+        vs1gc_ingest.ingest(corpus)
+
+        print("\n=== 2e. Ingesting: Vector Search 2.0 ===")
         vs2_collection = vs2_ingest.get_or_create_collection()
         vs2_ingest.ingest(corpus, vs2_collection)
     else:
@@ -77,18 +82,22 @@ def main(skip_ingest: bool = False):
     def _run_vs1():
         return vs1_query.run_queries(queries, top_k=10)
 
+    def _run_vs1gc():
+        return vs1gc_query.run_queries(queries, top_k=10)
+
     def _run_vs2():
         return vs2_query.run_queries(queries, top_k=10)
 
     system_fns = {
-        "rag":  _run_rag,
-        "vs":   _run_vs,
-        "vs1":  _run_vs1,
-        "vs2":  _run_vs2,
+        "rag":   _run_rag,
+        "vs":    _run_vs,
+        "vs1":   _run_vs1,
+        "vs1gc": _run_vs1gc,
+        "vs2":   _run_vs2,
     }
 
     system_results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(fn): name for name, fn in system_fns.items()}
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
@@ -96,29 +105,33 @@ def main(skip_ingest: bool = False):
             system_results[name] = (results_i, latencies_i)
             print(f"  [{name}] done")
 
-    rag_results,  rag_latencies  = system_results["rag"]
-    vs_results,   vs_latencies   = system_results["vs"]
-    vs1_results,  vs1_latencies  = system_results["vs1"]
-    vs2_results,  vs2_latencies  = system_results["vs2"]
+    rag_results,   rag_latencies   = system_results["rag"]
+    vs_results,    vs_latencies    = system_results["vs"]
+    vs1_results,   vs1_latencies   = system_results["vs1"]
+    vs1gc_results, vs1gc_latencies = system_results["vs1gc"]
+    vs2_results,   vs2_latencies   = system_results["vs2"]
 
     # ── 4. Evaluate ───────────────────────────────────────────────────────────
     print("\n=== 4. Evaluating ===")
-    rag_metrics  = compute_metrics(qrels, rag_results,  config.K_VALUES)
-    vs_metrics   = compute_metrics(qrels, vs_results,   config.K_VALUES)
-    vs1_metrics  = compute_metrics(qrels, vs1_results,  config.K_VALUES)
-    vs2_metrics  = compute_metrics(qrels, vs2_results,  config.K_VALUES)
+    rag_metrics   = compute_metrics(qrels, rag_results,   config.K_VALUES)
+    vs_metrics    = compute_metrics(qrels, vs_results,    config.K_VALUES)
+    vs1_metrics   = compute_metrics(qrels, vs1_results,   config.K_VALUES)
+    vs1gc_metrics = compute_metrics(qrels, vs1gc_results, config.K_VALUES)
+    vs2_metrics   = compute_metrics(qrels, vs2_results,   config.K_VALUES)
 
-    rag_metrics["Avg Latency (ms)"]  = compute_avg_latency(rag_latencies)
-    vs_metrics["Avg Latency (ms)"]   = compute_avg_latency(vs_latencies)
-    vs1_metrics["Avg Latency (ms)"]  = compute_avg_latency(vs1_latencies)
-    vs2_metrics["Avg Latency (ms)"]  = compute_avg_latency(vs2_latencies)
+    rag_metrics["Avg Latency (ms)"]   = compute_avg_latency(rag_latencies)
+    vs_metrics["Avg Latency (ms)"]    = compute_avg_latency(vs_latencies)
+    vs1_metrics["Avg Latency (ms)"]   = compute_avg_latency(vs1_latencies)
+    vs1gc_metrics["Avg Latency (ms)"] = compute_avg_latency(vs1gc_latencies)
+    vs2_metrics["Avg Latency (ms)"]   = compute_avg_latency(vs2_latencies)
 
     # ── 5. Print & Save ───────────────────────────────────────────────────────
     rows = [
-        {"System": "RAG Engine",        **rag_metrics},
-        {"System": "Vertex Search",     **vs_metrics},
-        {"System": "Vector Search 1.0", **vs1_metrics},
-        {"System": "Vector Search 2.0", **vs2_metrics},
+        {"System": "RAG Engine",                    **rag_metrics},
+        {"System": "Vertex Search",                 **vs_metrics},
+        {"System": "Vector Search 1.0",             **vs1_metrics},
+        {"System": "Vector Search 1.0 GC",          **vs1gc_metrics},
+        {"System": "Vector Search 2.0",             **vs2_metrics},
     ]
     df = pd.DataFrame(rows).set_index("System")
 

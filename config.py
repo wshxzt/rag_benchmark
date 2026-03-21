@@ -13,6 +13,12 @@ VS1_ENDPOINT_DISPLAY_NAME = "beir-scifact-vs1-endpoint"
 VS1_DEPLOYED_INDEX_ID     = "beir_scifact_vs1"
 VS1_GCS_PREFIX            = "vs1_embeddings/scifact"
 
+# Vector Search 1.0 with Gemini-style chunking (text-embedding-005, 512-char chunks)
+VS1_GC_INDEX_DISPLAY_NAME    = "beir-scifact-vs1-gc"
+VS1_GC_ENDPOINT_DISPLAY_NAME = "beir-scifact-vs1-gc-endpoint"
+VS1_GC_DEPLOYED_INDEX_ID     = "beir_scifact_vs1_gc"
+VS1_GC_GCS_PREFIX            = "vs1_gc_embeddings/scifact"
+
 VS2_LOCATION      = os.environ.get("GCP_VS2_LOCATION", "us-central1")  # Vector Search 2.0 region
 VS2_COLLECTION_ID = "beir-scifact-vs2"
 
