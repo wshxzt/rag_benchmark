@@ -1,5 +1,5 @@
 """
-RAG Benchmark: Vertex AI RAG Engine vs Vertex AI Search
+RAG Benchmark: Vertex AI RAG Engine vs Vertex AI Search vs Vector Search 2.0
 Dataset: BEIR/scifact
 
 Usage:
@@ -18,8 +18,10 @@ from data.download import download_and_load
 from evaluate.metrics import compute_avg_latency, compute_metrics
 from ingest import rag_engine as rag_ingest
 from ingest import vertex_search as vs_ingest
+from ingest import vector_search_v2 as vs2_ingest
 from query import rag_engine as rag_query
 from query import vertex_search as vs_query
+from query import vector_search_v2 as vs2_query
 
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
 ID_MAP_PATH = os.path.join(config.RESULTS_DIR, "rag_engine_id_map.json")
@@ -42,15 +44,19 @@ def main(skip_ingest: bool = False):
             print(f"  Saved id_map to {ID_MAP_PATH}")
         else:
             print(f"  id_map already exists at {ID_MAP_PATH}, skipping ingest.")
-            rag_corpus_name = rag_ingest.get_or_create_corpus()
 
         print("\n=== 2b. Ingesting: Vertex AI Search ===")
         vs_ingest.get_or_create_data_store()
         vs_ingest.get_or_create_engine()
         vs_ingest.ingest(corpus)
+
+        print("\n=== 2c. Ingesting: Vector Search 2.0 ===")
+        vs2_collection = vs2_ingest.get_or_create_collection()
+        vs2_ingest.ingest(corpus, vs2_collection)
     else:
         print("\n=== Skipping ingest (--skip-ingest) ===")
         rag_corpus_name = rag_ingest.get_or_create_corpus()
+        vs2_collection  = vs2_ingest.get_or_create_collection()
 
     # ── 3. Query ──────────────────────────────────────────────────────────────
     print("\n=== 3a. Querying: Vertex AI RAG Engine ===")
@@ -62,18 +68,24 @@ def main(skip_ingest: bool = False):
     print("\n=== 3b. Querying: Vertex AI Search ===")
     vs_results, vs_latencies = vs_query.run_queries(queries, top_k=10)
 
+    print("\n=== 3c. Querying: Vector Search 2.0 ===")
+    vs2_results, vs2_latencies = vs2_query.run_queries(queries, top_k=10)
+
     # ── 4. Evaluate ───────────────────────────────────────────────────────────
     print("\n=== 4. Evaluating ===")
-    rag_metrics = compute_metrics(qrels, rag_results, config.K_VALUES)
-    vs_metrics  = compute_metrics(qrels, vs_results,  config.K_VALUES)
+    rag_metrics  = compute_metrics(qrels, rag_results,  config.K_VALUES)
+    vs_metrics   = compute_metrics(qrels, vs_results,   config.K_VALUES)
+    vs2_metrics  = compute_metrics(qrels, vs2_results,  config.K_VALUES)
 
-    rag_metrics["Avg Latency (ms)"] = compute_avg_latency(rag_latencies)
-    vs_metrics["Avg Latency (ms)"]  = compute_avg_latency(vs_latencies)
+    rag_metrics["Avg Latency (ms)"]  = compute_avg_latency(rag_latencies)
+    vs_metrics["Avg Latency (ms)"]   = compute_avg_latency(vs_latencies)
+    vs2_metrics["Avg Latency (ms)"]  = compute_avg_latency(vs2_latencies)
 
     # ── 5. Print & Save ───────────────────────────────────────────────────────
     rows = [
-        {"System": "RAG Engine",    **rag_metrics},
-        {"System": "Vertex Search", **vs_metrics},
+        {"System": "RAG Engine",      **rag_metrics},
+        {"System": "Vertex Search",   **vs_metrics},
+        {"System": "Vector Search 2.0", **vs2_metrics},
     ]
     df = pd.DataFrame(rows).set_index("System")
 
