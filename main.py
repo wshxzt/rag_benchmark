@@ -1,5 +1,5 @@
 """
-RAG Benchmark: Vertex AI RAG Engine vs Vertex AI Search vs Vector Search 2.0
+RAG Benchmark: Vertex AI RAG Engine vs Vertex AI Search vs Vector Search 1.0 vs 2.0
 Dataset: BEIR/scifact
 
 Usage:
@@ -18,9 +18,11 @@ from data.download import download_and_load
 from evaluate.metrics import compute_avg_latency, compute_metrics
 from ingest import rag_engine as rag_ingest
 from ingest import vertex_search as vs_ingest
+from ingest import vector_search_v1 as vs1_ingest
 from ingest import vector_search_v2 as vs2_ingest
 from query import rag_engine as rag_query
 from query import vertex_search as vs_query
+from query import vector_search_v1 as vs1_query
 from query import vector_search_v2 as vs2_query
 
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
@@ -50,7 +52,10 @@ def main(skip_ingest: bool = False):
         vs_ingest.get_or_create_engine()
         vs_ingest.ingest(corpus)
 
-        print("\n=== 2c. Ingesting: Vector Search 2.0 ===")
+        print("\n=== 2c. Ingesting: Vector Search 1.0 ===")
+        vs1_ingest.ingest(corpus)
+
+        print("\n=== 2d. Ingesting: Vector Search 2.0 ===")
         vs2_collection = vs2_ingest.get_or_create_collection()
         vs2_ingest.ingest(corpus, vs2_collection)
     else:
@@ -68,23 +73,29 @@ def main(skip_ingest: bool = False):
     print("\n=== 3b. Querying: Vertex AI Search ===")
     vs_results, vs_latencies = vs_query.run_queries(queries, top_k=10)
 
-    print("\n=== 3c. Querying: Vector Search 2.0 ===")
+    print("\n=== 3c. Querying: Vector Search 1.0 ===")
+    vs1_results, vs1_latencies = vs1_query.run_queries(queries, top_k=10)
+
+    print("\n=== 3d. Querying: Vector Search 2.0 ===")
     vs2_results, vs2_latencies = vs2_query.run_queries(queries, top_k=10)
 
     # ── 4. Evaluate ───────────────────────────────────────────────────────────
     print("\n=== 4. Evaluating ===")
     rag_metrics  = compute_metrics(qrels, rag_results,  config.K_VALUES)
     vs_metrics   = compute_metrics(qrels, vs_results,   config.K_VALUES)
+    vs1_metrics  = compute_metrics(qrels, vs1_results,  config.K_VALUES)
     vs2_metrics  = compute_metrics(qrels, vs2_results,  config.K_VALUES)
 
     rag_metrics["Avg Latency (ms)"]  = compute_avg_latency(rag_latencies)
     vs_metrics["Avg Latency (ms)"]   = compute_avg_latency(vs_latencies)
+    vs1_metrics["Avg Latency (ms)"]  = compute_avg_latency(vs1_latencies)
     vs2_metrics["Avg Latency (ms)"]  = compute_avg_latency(vs2_latencies)
 
     # ── 5. Print & Save ───────────────────────────────────────────────────────
     rows = [
-        {"System": "RAG Engine",      **rag_metrics},
-        {"System": "Vertex Search",   **vs_metrics},
+        {"System": "RAG Engine",        **rag_metrics},
+        {"System": "Vertex Search",     **vs_metrics},
+        {"System": "Vector Search 1.0", **vs1_metrics},
         {"System": "Vector Search 2.0", **vs2_metrics},
     ]
     df = pd.DataFrame(rows).set_index("System")
