@@ -138,7 +138,7 @@ Answer:\
 """
 
 
-def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str = None):
+def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str = None, k: int = 10):
     # ── Run identity ──────────────────────────────────────────────────────────
     run_id  = retry_run if retry_run else str(uuid.uuid4())
     run_dir = os.path.join(config.RESULTS_DIR, run_id)
@@ -147,10 +147,10 @@ def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str 
     if retry_run:
         print(f"=== Retrying run {run_id} (failed queries only) ===")
     else:
-        meta = {"run_id": run_id, "started_at": datetime.now(timezone.utc).isoformat()}
+        meta = {"run_id": run_id, "started_at": datetime.now(timezone.utc).isoformat(), "k": k}
         with open(os.path.join(run_dir, "run_info.json"), "w") as f:
             json.dump(meta, f, indent=2)
-        print(f"=== Run ID: {run_id} ===")
+        print(f"=== Run ID: {run_id} | K={k} ===")
 
     # ── 1. Download ───────────────────────────────────────────────────────────
     print("=== 1. Downloading BEIR/scifact ===")
@@ -205,19 +205,19 @@ def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str 
 
     if pending_engines:
         def _run_rag():
-            return rag_query.run_queries(queries, rag_corpus_name, id_map, top_k=10)
+            return rag_query.run_queries(queries, rag_corpus_name, id_map, top_k=k)
 
         def _run_vs():
-            return vs_query.run_queries(queries, top_k=10)
+            return vs_query.run_queries(queries, top_k=k)
 
         def _run_vs1():
-            return vs1_query.run_queries(queries, top_k=10)
+            return vs1_query.run_queries(queries, top_k=k)
 
         def _run_vs1gc():
-            return vs1gc_query.run_queries(queries, top_k=10)
+            return vs1gc_query.run_queries(queries, top_k=k)
 
         def _run_vs2():
-            return vs2_query.run_queries(queries, top_k=10)
+            return vs2_query.run_queries(queries, top_k=k)
 
         all_fns = {
             "rag": _run_rag, "vs": _run_vs, "vs1": _run_vs1,
@@ -246,11 +246,11 @@ def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str 
 
     # ── 4. Retrieval evaluation ───────────────────────────────────────────────
     print("\n=== 4. Evaluating retrieval metrics ===")
-    rag_metrics   = compute_metrics(qrels, rag_results,   config.K_VALUES)
-    vs_metrics    = compute_metrics(qrels, vs_results,    config.K_VALUES)
-    vs1_metrics   = compute_metrics(qrels, vs1_results,   config.K_VALUES)
-    vs1gc_metrics = compute_metrics(qrels, vs1gc_results, config.K_VALUES)
-    vs2_metrics   = compute_metrics(qrels, vs2_results,   config.K_VALUES)
+    rag_metrics   = compute_metrics(qrels, rag_results,   [k])
+    vs_metrics    = compute_metrics(qrels, vs_results,    [k])
+    vs1_metrics   = compute_metrics(qrels, vs1_results,   [k])
+    vs1gc_metrics = compute_metrics(qrels, vs1gc_results, [k])
+    vs2_metrics   = compute_metrics(qrels, vs2_results,   [k])
 
     rag_metrics["Avg Latency (ms)"]   = compute_avg_latency(rag_latencies)
     vs_metrics["Avg Latency (ms)"]    = compute_avg_latency(vs_latencies)
@@ -343,5 +343,12 @@ if __name__ == "__main__":
         default=None,
         help="Resume a previous run: load its retrieval checkpoints and retry only failed queries",
     )
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=10,
+        help="Retrieval cutoff: number of docs to retrieve and evaluate at (default: 10)",
+    )
     args = parser.parse_args()
-    main(skip_ingest=args.skip_ingest, skip_generate=args.skip_generate, retry_run=args.retry_run)
+    main(skip_ingest=args.skip_ingest, skip_generate=args.skip_generate,
+         retry_run=args.retry_run, k=args.k)
