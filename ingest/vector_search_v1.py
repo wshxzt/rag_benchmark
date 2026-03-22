@@ -148,14 +148,20 @@ def deploy_index(
         return
 
     print("  Deploying index to endpoint (this takes ~20-30 min) ...")
-    endpoint.deploy_index(
-        index=index,
-        deployed_index_id=config.VS1_DEPLOYED_INDEX_ID,
-        machine_type="n1-standard-16",  # required for SHARD_SIZE_MEDIUM (brute-force default)
-        min_replica_count=1,
-        max_replica_count=1,
-    )
-    print("  Deployment complete.")
+    try:
+        endpoint.deploy_index(
+            index=index,
+            deployed_index_id=config.VS1_DEPLOYED_INDEX_ID,
+            machine_type="n1-standard-16",  # required for SHARD_SIZE_MEDIUM (brute-force default)
+            min_replica_count=1,
+            max_replica_count=1,
+        )
+        print("  Deployment complete.")
+    except Exception as e:
+        if "already exists" in str(e).lower() or "409" in str(e):
+            print(f"  Index already deployed as '{config.VS1_DEPLOYED_INDEX_ID}' (from previous run), reusing.")
+        else:
+            raise
 
 
 def ingest(corpus: dict):

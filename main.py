@@ -222,7 +222,11 @@ def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str 
 
     # ── 3. Query (all 5 systems in parallel) ─────────────────────────────────
     print("\n=== 3. Querying all systems in parallel ===")
-    id_map = json.load(open(ID_MAP_PATH))
+    if os.path.exists(ID_MAP_PATH):
+        id_map = json.load(open(ID_MAP_PATH))
+    else:
+        print(f"  WARNING: {ID_MAP_PATH} not found — RAG engine will be skipped in querying.")
+        id_map = None
 
     # Check which engines already have retrieval checkpoints
     pending_engines = {}
@@ -234,6 +238,11 @@ def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str 
             system_results[name] = (cached_results, cached_latencies)
         else:
             pending_engines[name] = None
+
+    if id_map is None and "rag" in pending_engines:
+        print("  [rag] skipping query — id_map not available (ingest failed)")
+        system_results["rag"] = ({}, {})
+        del pending_engines["rag"]
 
     if pending_engines:
         def _run_rag():

@@ -75,25 +75,35 @@ def _ingest_via_gcs(corpus_name: str, corpus: dict, bucket_name: str) -> dict:
                       total=len(futures), desc="  GCS upload"):
             pass
 
-    gcs_uri = f"gs://{bucket_name}/{gcs_prefix}"
-    print(f"  Calling import_files from {gcs_uri} ...")
-    for attempt in range(3):
-        try:
-            response = rag.import_files(
-                corpus_name=corpus_name,
-                paths=[gcs_uri],
-                chunk_size=512,
-                chunk_overlap=50,
-                timeout=600,
-            )
-            print(f"  Import complete: {response}")
-            break
-        except Exception as e:
-            if attempt < 2:
-                print(f"  import_files attempt {attempt+1} failed: {e}. Retrying...")
-                import time; time.sleep(10)
-            else:
-                raise
+    # import_files is limited to 10,000 files per call — batch into chunks of 9,000
+    BATCH_LIMIT = 9000
+    all_blobs = sorted(
+        b.name for b in bucket.list_blobs(prefix=gcs_prefix) if b.name.endswith(".txt")
+    )
+    total_batches = (len(all_blobs) - 1) // BATCH_LIMIT + 1
+    print(f"  Importing {len(all_blobs)} files in {total_batches} batch(es) of ≤{BATCH_LIMIT} ...")
+    for i in range(0, len(all_blobs), BATCH_LIMIT):
+        batch_uris = [f"gs://{bucket_name}/{b}" for b in all_blobs[i:i + BATCH_LIMIT]]
+        batch_num = i // BATCH_LIMIT + 1
+        print(f"  Batch {batch_num}/{total_batches}: {len(batch_uris)} files ...")
+        for attempt in range(3):
+            try:
+                import time
+                response = rag.import_files(
+                    corpus_name=corpus_name,
+                    paths=batch_uris,
+                    chunk_size=512,
+                    chunk_overlap=50,
+                    timeout=600,
+                )
+                print(f"  Batch {batch_num} complete: {response}")
+                break
+            except Exception as e:
+                if attempt < 2:
+                    print(f"  import_files batch {batch_num} attempt {attempt+1} failed: {e}. Retrying...")
+                    time.sleep(10)
+                else:
+                    raise
 
     # Build id_map from GCS URI -> doc_id (doc_id is the filename stem)
     id_map = {}
