@@ -50,7 +50,7 @@ Respond with exactly this JSON (fill in the integers):
 {{"faithfulness": <1-5>, "relevance": <1-5>}}\
 """
 
-RATING_CONFIG = GenerationConfig(temperature=0.0, max_output_tokens=1024)
+RATING_CONFIG = GenerationConfig(temperature=0.0, max_output_tokens=2048)
 
 
 def _build_context(results: dict, corpus: dict, max_docs: int) -> str:
@@ -115,7 +115,11 @@ def rate_answers(
         for attempt in range(6):
             try:
                 response = model.generate_content(prompt, generation_config=RATING_CONFIG)
-                return query_id, _parse_scores(response.text)
+                try:
+                    return query_id, _parse_scores(response.text)
+                except ValueError:
+                    # finish_reason=MAX_TOKENS with no output parts — return zeros
+                    return query_id, {"Faithfulness": 0.0, "Relevance": 0.0}
             except ResourceExhausted:
                 if attempt == 5:
                     raise
