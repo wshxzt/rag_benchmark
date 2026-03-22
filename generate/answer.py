@@ -7,6 +7,7 @@ All queries are generated concurrently via a thread pool.
 """
 import concurrent.futures
 import time
+from typing import Optional
 
 import vertexai
 from google.api_core.exceptions import ResourceExhausted
@@ -14,6 +15,7 @@ from tqdm import tqdm
 from vertexai.generative_models import GenerationConfig, GenerativeModel
 
 import config
+from utils.checkpoint import Checkpoint
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -52,6 +54,7 @@ def generate_answers(
     prompt_template: str = DEFAULT_PROMPT,
     max_docs: int = 5,
     max_workers: int = 16,
+    checkpoint: Optional[Checkpoint] = None,
 ) -> dict:
     """
     Generate one answer per query using the retrieved context.
@@ -91,9 +94,15 @@ def generate_answers(
                 time.sleep(delay)
                 delay *= 2
 
-    answers: dict[str, str] = {}
+    # Seed answers from checkpoint; only submit pending queries
+    answers: dict[str, str] = checkpoint.data() if checkpoint else {}
+    pending = [qid for qid in queries if not (checkpoint and checkpoint.done(qid))]
+
+    if not pending:
+        return answers
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_generate_one, qid): qid for qid in queries}
+        futures = {executor.submit(_generate_one, qid): qid for qid in pending}
         for future in tqdm(
             concurrent.futures.as_completed(futures),
             total=len(futures),
@@ -101,5 +110,7 @@ def generate_answers(
         ):
             query_id, answer = future.result()
             answers[query_id] = answer
+            if checkpoint:
+                checkpoint.record(query_id, answer)
 
     return answers

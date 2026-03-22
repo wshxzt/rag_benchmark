@@ -12,6 +12,7 @@ import concurrent.futures
 import json
 import re
 import time
+from typing import Optional
 
 import vertexai
 from google.api_core.exceptions import ResourceExhausted
@@ -19,6 +20,7 @@ from tqdm import tqdm
 from vertexai.generative_models import GenerationConfig, GenerativeModel
 
 import config
+from utils.checkpoint import Checkpoint
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -83,6 +85,7 @@ def rate_answers(
     corpus: dict,
     max_docs: int = 5,
     max_workers: int = 16,
+    checkpoint: Optional[Checkpoint] = None,
 ) -> dict:
     """
     Rate every answer on faithfulness and relevance.
@@ -119,9 +122,15 @@ def rate_answers(
                 time.sleep(delay)
                 delay *= 2
 
-    ratings: dict[str, dict] = {}
+    # Seed ratings from checkpoint; only submit pending queries
+    ratings: dict[str, dict] = checkpoint.data() if checkpoint else {}
+    pending = [qid for qid in queries if not (checkpoint and checkpoint.done(qid))]
+
+    if not pending:
+        return ratings
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_rate_one, qid): qid for qid in queries}
+        futures = {executor.submit(_rate_one, qid): qid for qid in pending}
         for future in tqdm(
             concurrent.futures.as_completed(futures),
             total=len(futures),
@@ -129,6 +138,8 @@ def rate_answers(
         ):
             query_id, scores = future.result()
             ratings[query_id] = scores
+            if checkpoint:
+                checkpoint.record(query_id, scores)
 
     return ratings
 

@@ -11,11 +11,15 @@ import argparse
 import concurrent.futures
 import json
 import os
+import uuid
+from datetime import datetime, timezone
+from typing import Optional, Tuple
 
 import pandas as pd
 from tabulate import tabulate
 
 import config
+from utils.checkpoint import Checkpoint
 from data.download import download_and_load
 from evaluate.autorater import avg_scores, rate_answers
 from evaluate.metrics import compute_avg_latency, compute_metrics
@@ -33,6 +37,36 @@ from query import vertex_search as vs_query
 
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
 ID_MAP_PATH = os.path.join(config.RESULTS_DIR, "rag_engine_id_map.json")
+
+ENGINES = ["rag", "vs", "vs1", "vs1gc", "vs2"]
+
+
+def _engine_dir(run_dir: str, engine: str) -> str:
+    d = os.path.join(run_dir, engine)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _save_retrieval(run_dir: str, engine: str, results: dict, latencies: dict) -> None:
+    d = _engine_dir(run_dir, engine)
+    with open(os.path.join(d, "retrieval.json"), "w") as f:
+        json.dump(results, f)
+    with open(os.path.join(d, "latencies.json"), "w") as f:
+        json.dump(latencies, f)
+
+
+def _load_retrieval(run_dir: str, engine: str) -> Tuple[Optional[dict], Optional[dict]]:
+    ret_path = os.path.join(run_dir, engine, "retrieval.json")
+    lat_path = os.path.join(run_dir, engine, "latencies.json")
+    if not os.path.exists(ret_path):
+        return None, None
+    with open(ret_path) as f:
+        results = json.load(f)
+    latencies = {}
+    if os.path.exists(lat_path):
+        with open(lat_path) as f:
+            latencies = json.load(f)
+    return results, latencies
 
 # ── Per-engine answer generation prompts ──────────────────────────────────────
 # Each prompt reflects how that engine retrieves and what kind of context it returns.
@@ -104,7 +138,20 @@ Answer:\
 """
 
 
-def main(skip_ingest: bool = False, skip_generate: bool = False):
+def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str = None):
+    # ── Run identity ──────────────────────────────────────────────────────────
+    run_id  = retry_run if retry_run else str(uuid.uuid4())
+    run_dir = os.path.join(config.RESULTS_DIR, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+
+    if retry_run:
+        print(f"=== Retrying run {run_id} (failed queries only) ===")
+    else:
+        meta = {"run_id": run_id, "started_at": datetime.now(timezone.utc).isoformat()}
+        with open(os.path.join(run_dir, "run_info.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+        print(f"=== Run ID: {run_id} ===")
+
     # ── 1. Download ───────────────────────────────────────────────────────────
     print("=== 1. Downloading BEIR/scifact ===")
     corpus, queries, qrels = download_and_load()
@@ -145,41 +192,51 @@ def main(skip_ingest: bool = False, skip_generate: bool = False):
     print("\n=== 3. Querying all systems in parallel ===")
     id_map = json.load(open(ID_MAP_PATH))
 
-    def _run_rag():
-        return rag_query.run_queries(queries, rag_corpus_name, id_map, top_k=10)
+    # Check which engines already have retrieval checkpoints
+    pending_engines = {}
+    system_results  = {}
+    for name in ENGINES:
+        cached_results, cached_latencies = _load_retrieval(run_dir, name)
+        if cached_results is not None:
+            print(f"  [{name}] retrieval loaded from checkpoint ({len(cached_results)} queries)")
+            system_results[name] = (cached_results, cached_latencies)
+        else:
+            pending_engines[name] = None
 
-    def _run_vs():
-        return vs_query.run_queries(queries, top_k=10)
+    if pending_engines:
+        def _run_rag():
+            return rag_query.run_queries(queries, rag_corpus_name, id_map, top_k=10)
 
-    def _run_vs1():
-        return vs1_query.run_queries(queries, top_k=10)
+        def _run_vs():
+            return vs_query.run_queries(queries, top_k=10)
 
-    def _run_vs1gc():
-        return vs1gc_query.run_queries(queries, top_k=10)
+        def _run_vs1():
+            return vs1_query.run_queries(queries, top_k=10)
 
-    def _run_vs2():
-        return vs2_query.run_queries(queries, top_k=10)
+        def _run_vs1gc():
+            return vs1gc_query.run_queries(queries, top_k=10)
 
-    system_fns = {
-        "rag":   _run_rag,
-        "vs":    _run_vs,
-        "vs1":   _run_vs1,
-        "vs1gc": _run_vs1gc,
-        "vs2":   _run_vs2,
-    }
+        def _run_vs2():
+            return vs2_query.run_queries(queries, top_k=10)
 
-    system_results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fn): name for name, fn in system_fns.items()}
-        for future in concurrent.futures.as_completed(futures):
-            name = futures[future]
-            try:
-                results_i, latencies_i = future.result()
-                system_results[name] = (results_i, latencies_i)
-                print(f"  [{name}] done")
-            except Exception as e:
-                print(f"  [{name}] FAILED: {e} — skipping")
-                system_results[name] = ({}, {})
+        all_fns = {
+            "rag": _run_rag, "vs": _run_vs, "vs1": _run_vs1,
+            "vs1gc": _run_vs1gc, "vs2": _run_vs2,
+        }
+        engine_fns = {name: fn for name, fn in all_fns.items() if name in pending_engines}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(engine_fns)) as executor:
+            futures = {executor.submit(fn): name for name, fn in engine_fns.items()}
+            for future in concurrent.futures.as_completed(futures):
+                name = futures[future]
+                try:
+                    results_i, latencies_i = future.result()
+                    system_results[name] = (results_i, latencies_i)
+                    _save_retrieval(run_dir, name, results_i, latencies_i)
+                    print(f"  [{name}] done — saved to {run_dir}/{name}/retrieval.json")
+                except Exception as e:
+                    print(f"  [{name}] FAILED: {e} — skipping")
+                    system_results[name] = ({}, {})
 
     rag_results,   rag_latencies   = system_results["rag"]
     vs_results,    vs_latencies    = system_results["vs"]
@@ -217,32 +274,36 @@ def main(skip_ingest: bool = False, skip_generate: bool = False):
                 continue
             print(f"\n=== 5. Answer generation + autorater: {name} ===")
 
+            eng_dir        = _engine_dir(run_dir, name)
+            answers_ckpt   = Checkpoint(os.path.join(eng_dir, "answers.json"))
+            ratings_ckpt   = Checkpoint(os.path.join(eng_dir, "ratings.json"))
+
             try:
-                print("  Generating answers ...")
+                pending_ans = len(queries) - len(answers_ckpt)
+                print(f"  Generating answers ... ({pending_ans} pending, {len(answers_ckpt)} cached)")
                 answers = generate_answers(
                     queries=queries,
                     results=results,
                     corpus=corpus,
                     prompt_template=prompt_tmpl,
+                    checkpoint=answers_ckpt,
                 )
 
-                print("  Rating answers ...")
+                pending_rat = len(queries) - len(ratings_ckpt)
+                print(f"  Rating answers ... ({pending_rat} pending, {len(ratings_ckpt)} cached)")
                 ratings = rate_answers(
                     queries=queries,
                     answers=answers,
                     results=results,
                     corpus=corpus,
+                    checkpoint=ratings_ckpt,
                 )
 
                 scores = avg_scores(ratings)
                 metrics["Faithfulness (1-5)"] = scores["Faithfulness"]
                 metrics["Relevance (1-5)"]    = scores["Relevance"]
 
-                # Save answers for inspection
-                answers_path = os.path.join(config.RESULTS_DIR, f"answers_{name}.json")
-                with open(answers_path, "w") as f:
-                    json.dump(answers, f, indent=2)
-                print(f"  Answers saved to {answers_path}")
+                print(f"  Answers/ratings saved to {eng_dir}/")
             except Exception as e:
                 print(f"  [{name}] answer gen/rating FAILED: {e} — skipping")
 
@@ -258,9 +319,10 @@ def main(skip_ingest: bool = False, skip_generate: bool = False):
 
     print("\n" + tabulate(df.round(4), headers="keys", tablefmt="github"))
 
-    csv_path = os.path.join(config.RESULTS_DIR, "comparison.csv")
+    csv_path = os.path.join(run_dir, "comparison.csv")
     df.to_csv(csv_path)
-    print(f"\nResults saved to {csv_path}")
+    print(f"\nRun ID: {run_id}")
+    print(f"Results saved to {csv_path}")
 
 
 if __name__ == "__main__":
@@ -275,5 +337,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip answer generation and LLM autorater",
     )
+    parser.add_argument(
+        "--retry-run",
+        metavar="UUID",
+        default=None,
+        help="Resume a previous run: load its retrieval checkpoints and retry only failed queries",
+    )
     args = parser.parse_args()
-    main(skip_ingest=args.skip_ingest, skip_generate=args.skip_generate)
+    main(skip_ingest=args.skip_ingest, skip_generate=args.skip_generate, retry_run=args.retry_run)
