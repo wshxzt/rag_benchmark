@@ -173,9 +173,13 @@ def main(skip_ingest: bool = False, skip_generate: bool = False):
         futures = {executor.submit(fn): name for name, fn in system_fns.items()}
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
-            results_i, latencies_i = future.result()
-            system_results[name] = (results_i, latencies_i)
-            print(f"  [{name}] done")
+            try:
+                results_i, latencies_i = future.result()
+                system_results[name] = (results_i, latencies_i)
+                print(f"  [{name}] done")
+            except Exception as e:
+                print(f"  [{name}] FAILED: {e} — skipping")
+                system_results[name] = ({}, {})
 
     rag_results,   rag_latencies   = system_results["rag"]
     vs_results,    vs_latencies    = system_results["vs"]
@@ -208,33 +212,39 @@ def main(skip_ingest: bool = False, skip_generate: bool = False):
         ]
 
         for name, results, prompt_tmpl, metrics in systems_for_gen:
+            if not results:
+                print(f"\n=== 5. Skipping answer gen for {name} (no results) ===")
+                continue
             print(f"\n=== 5. Answer generation + autorater: {name} ===")
 
-            print("  Generating answers ...")
-            answers = generate_answers(
-                queries=queries,
-                results=results,
-                corpus=corpus,
-                prompt_template=prompt_tmpl,
-            )
+            try:
+                print("  Generating answers ...")
+                answers = generate_answers(
+                    queries=queries,
+                    results=results,
+                    corpus=corpus,
+                    prompt_template=prompt_tmpl,
+                )
 
-            print("  Rating answers ...")
-            ratings = rate_answers(
-                queries=queries,
-                answers=answers,
-                results=results,
-                corpus=corpus,
-            )
+                print("  Rating answers ...")
+                ratings = rate_answers(
+                    queries=queries,
+                    answers=answers,
+                    results=results,
+                    corpus=corpus,
+                )
 
-            scores = avg_scores(ratings)
-            metrics["Faithfulness (1-5)"] = scores["Faithfulness"]
-            metrics["Relevance (1-5)"]    = scores["Relevance"]
+                scores = avg_scores(ratings)
+                metrics["Faithfulness (1-5)"] = scores["Faithfulness"]
+                metrics["Relevance (1-5)"]    = scores["Relevance"]
 
-            # Save answers for inspection
-            answers_path = os.path.join(config.RESULTS_DIR, f"answers_{name}.json")
-            with open(answers_path, "w") as f:
-                json.dump(answers, f, indent=2)
-            print(f"  Answers saved to {answers_path}")
+                # Save answers for inspection
+                answers_path = os.path.join(config.RESULTS_DIR, f"answers_{name}.json")
+                with open(answers_path, "w") as f:
+                    json.dump(answers, f, indent=2)
+                print(f"  Answers saved to {answers_path}")
+            except Exception as e:
+                print(f"  [{name}] answer gen/rating FAILED: {e} — skipping")
 
     # ── 6. Print & Save ───────────────────────────────────────────────────────
     rows = [

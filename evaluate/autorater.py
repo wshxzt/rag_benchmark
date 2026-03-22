@@ -11,8 +11,10 @@ to produce per-engine scalars for the comparison table.
 import concurrent.futures
 import json
 import re
+import time
 
 import vertexai
+from google.api_core.exceptions import ResourceExhausted
 from tqdm import tqdm
 from vertexai.generative_models import GenerationConfig, GenerativeModel
 
@@ -106,8 +108,16 @@ def rate_answers(
             context=context,
             answer=answers.get(query_id, ""),
         )
-        response = model.generate_content(prompt, generation_config=RATING_CONFIG)
-        return query_id, _parse_scores(response.text)
+        delay = 2.0
+        for attempt in range(6):
+            try:
+                response = model.generate_content(prompt, generation_config=RATING_CONFIG)
+                return query_id, _parse_scores(response.text)
+            except ResourceExhausted:
+                if attempt == 5:
+                    raise
+                time.sleep(delay)
+                delay *= 2
 
     ratings: dict[str, dict] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:

@@ -6,8 +6,10 @@ renders an engine-specific prompt, and generates a grounded answer.
 All queries are generated concurrently via a thread pool.
 """
 import concurrent.futures
+import time
 
 import vertexai
+from google.api_core.exceptions import ResourceExhausted
 from tqdm import tqdm
 from vertexai.generative_models import GenerationConfig, GenerativeModel
 
@@ -72,8 +74,22 @@ def generate_answers(
         query_text = queries[query_id]
         context    = _build_context(results.get(query_id, {}), corpus, max_docs)
         prompt     = prompt_template.format(query=query_text, context=context)
-        response   = model.generate_content(prompt, generation_config=GENERATION_CONFIG)
-        return query_id, response.text.strip()
+        delay = 2.0
+        for attempt in range(6):
+            try:
+                response = model.generate_content(prompt, generation_config=GENERATION_CONFIG)
+                try:
+                    return query_id, response.text.strip()
+                except ValueError:
+                    # finish_reason=MAX_TOKENS — extract partial text if available
+                    parts = response.candidates[0].content.parts
+                    text = parts[0].text.strip() if parts else ""
+                    return query_id, text
+            except ResourceExhausted:
+                if attempt == 5:
+                    raise
+                time.sleep(delay)
+                delay *= 2
 
     answers: dict[str, str] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:

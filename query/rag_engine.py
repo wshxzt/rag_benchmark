@@ -44,7 +44,7 @@ def run_queries(
     corpus_name: str,
     id_map: dict,
     top_k: int = 10,
-    max_workers: int = 32,
+    max_workers: int = 4,
 ) -> tuple:
     """
     Args:
