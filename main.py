@@ -36,7 +36,7 @@ from query import vector_search_v2 as vs2_query
 from query import vertex_search as vs_query
 
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
-ID_MAP_PATH = os.path.join(config.RESULTS_DIR, "rag_engine_id_map.json")
+ID_MAP_PATH = os.path.join(config.RESULTS_DIR, f"rag_engine_id_map_{config.BEIR_DATASET}.json")
 
 ENGINES = ["rag", "vs", "vs1", "vs1gc", "vs2"]
 
