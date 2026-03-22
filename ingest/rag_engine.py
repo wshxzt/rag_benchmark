@@ -10,6 +10,7 @@ Two strategies:
 The returned id_map {rag_file_resource_name: beir_doc_id} must be saved to disk
 and loaded by query/rag_engine.py to map retrieved contexts back to BEIR doc IDs.
 """
+import concurrent.futures
 import os
 import tempfile
 import vertexai
@@ -60,10 +61,19 @@ def _ingest_via_gcs(corpus_name: str, corpus: dict, bucket_name: str) -> dict:
         if f"{gcs_prefix}/{doc_id}.txt" not in existing
     }
     print(f"  Staging {len(to_upload)}/{len(corpus)} docs to gs://{bucket_name}/{gcs_prefix}/ ({len(existing)} already exist)")
-    for doc_id, doc in tqdm(to_upload.items(), desc="  GCS upload"):
+
+    def _upload_one(item):
+        doc_id, doc = item
         content = f"{doc.get('title', '')}\n\n{doc['text']}"
-        blob = bucket.blob(f"{gcs_prefix}/{doc_id}.txt")
-        blob.upload_from_string(content, content_type="text/plain")
+        bucket.blob(f"{gcs_prefix}/{doc_id}.txt").upload_from_string(
+            content, content_type="text/plain"
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        futures = [executor.submit(_upload_one, item) for item in to_upload.items()]
+        for _ in tqdm(concurrent.futures.as_completed(futures),
+                      total=len(futures), desc="  GCS upload"):
+            pass
 
     gcs_uri = f"gs://{bucket_name}/{gcs_prefix}"
     print(f"  Calling import_files from {gcs_uri} ...")

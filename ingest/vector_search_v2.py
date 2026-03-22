@@ -4,6 +4,7 @@ Ingest BEIR corpus into Vertex AI Vector Search 2.0.
 Creates a Collection with auto-embedding via text-embedding-004, then batch-inserts
 all documents. No manual embedding generation or endpoint deployment required.
 """
+import concurrent.futures
 from tqdm import tqdm
 from google.cloud import vectorsearch_v1beta as vs
 import config
@@ -70,15 +71,15 @@ def get_or_create_collection() -> str:
     return collection_path
 
 
-def ingest(corpus: dict, collection_path: str):
-    """Batch-insert all docs using dynamic token-aware batching.
+def ingest(corpus: dict, collection_path: str, max_workers: int = 8):
+    """Batch-insert all docs concurrently using dynamic token-aware batching.
     Server auto-generates embeddings via text-embedding-004."""
     client = _do_client()
     docs   = list(corpus.items())
     texts  = [f"{d.get('title', '')}\n\n{d['text']}" for _, d in docs]
-    batches = dynamic_batches(texts)
+    batches = list(dynamic_batches(texts))
 
-    for idx_batch in tqdm(batches, desc="  Inserting data objects"):
+    def _insert_batch(idx_batch):
         batch = [docs[i] for i in idx_batch]
         create_requests = [
             vs.CreateDataObjectRequest(
@@ -100,7 +101,6 @@ def ingest(corpus: dict, collection_path: str):
         except Exception as e:
             if "already exists" not in str(e).lower():
                 raise
-            # Fall back to update for each doc individually
             for doc_id, doc in batch:
                 data_object = vs.DataObject(
                     name=f"{collection_path}/dataObjects/{doc_id}",
@@ -109,3 +109,9 @@ def ingest(corpus: dict, collection_path: str):
                 client.update_data_object(
                     request=vs.UpdateDataObjectRequest(data_object=data_object)
                 )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_insert_batch, b) for b in batches]
+        for _ in tqdm(concurrent.futures.as_completed(futures),
+                      total=len(futures), desc="  Inserting data objects"):
+            pass

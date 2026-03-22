@@ -159,30 +159,62 @@ def main(skip_ingest: bool = False, skip_generate: bool = False, retry_run: str 
 
     # ── 2. Ingest ─────────────────────────────────────────────────────────────
     if not skip_ingest:
-        print("\n=== 2a. Ingesting: Vertex AI RAG Engine ===")
-        rag_corpus_name = rag_ingest.get_or_create_corpus()
-        if not os.path.exists(ID_MAP_PATH):
-            id_map = rag_ingest.ingest(rag_corpus_name, corpus)
-            with open(ID_MAP_PATH, "w") as f:
-                json.dump(id_map, f)
-            print(f"  Saved id_map to {ID_MAP_PATH}")
-        else:
-            print(f"  id_map already exists at {ID_MAP_PATH}, skipping ingest.")
+        print("\n=== 2. Ingesting all engines in parallel ===")
 
-        print("\n=== 2b. Ingesting: Vertex AI Search ===")
-        vs_ingest.get_or_create_data_store()
-        vs_ingest.get_or_create_engine()
-        vs_ingest.ingest(corpus)
+        def _ingest_rag():
+            print("  [rag] starting ...")
+            name = rag_ingest.get_or_create_corpus()
+            if not os.path.exists(ID_MAP_PATH):
+                id_map_data = rag_ingest.ingest(name, corpus)
+                with open(ID_MAP_PATH, "w") as f:
+                    json.dump(id_map_data, f)
+                print(f"  [rag] id_map saved to {ID_MAP_PATH}")
+            else:
+                print(f"  [rag] id_map already exists, skipping ingest.")
+            return name
 
-        print("\n=== 2c. Ingesting: Vector Search 1.0 ===")
-        vs1_ingest.ingest(corpus)
+        def _ingest_vs():
+            print("  [vs] starting ...")
+            vs_ingest.get_or_create_data_store()
+            vs_ingest.get_or_create_engine()
+            vs_ingest.ingest(corpus)
+            print("  [vs] done")
 
-        print("\n=== 2d. Ingesting: Vector Search 1.0 + Gemini Chunking ===")
-        vs1gc_ingest.ingest(corpus)
+        def _ingest_vs1():
+            print("  [vs1] starting ...")
+            vs1_ingest.ingest(corpus)
+            print("  [vs1] done")
 
-        print("\n=== 2e. Ingesting: Vector Search 2.0 ===")
-        vs2_collection = vs2_ingest.get_or_create_collection()
-        vs2_ingest.ingest(corpus, vs2_collection)
+        def _ingest_vs1gc():
+            print("  [vs1gc] starting ...")
+            vs1gc_ingest.ingest(corpus)
+            print("  [vs1gc] done")
+
+        def _ingest_vs2():
+            print("  [vs2] starting ...")
+            col = vs2_ingest.get_or_create_collection()
+            vs2_ingest.ingest(corpus, col)
+            print("  [vs2] done")
+            return col
+
+        ingest_fns = {
+            "rag": _ingest_rag, "vs": _ingest_vs, "vs1": _ingest_vs1,
+            "vs1gc": _ingest_vs1gc, "vs2": _ingest_vs2,
+        }
+        ingest_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(fn): name for name, fn in ingest_fns.items()}
+            for future in concurrent.futures.as_completed(futures):
+                name = futures[future]
+                try:
+                    ingest_results[name] = future.result()
+                    print(f"  [{name}] ingest complete")
+                except Exception as e:
+                    print(f"  [{name}] ingest FAILED: {e}")
+                    ingest_results[name] = None
+
+        rag_corpus_name = ingest_results["rag"]
+        vs2_collection  = ingest_results["vs2"]
     else:
         print("\n=== Skipping ingest (--skip-ingest) ===")
         rag_corpus_name = rag_ingest.get_or_create_corpus()

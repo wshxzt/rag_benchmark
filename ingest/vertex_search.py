@@ -4,6 +4,7 @@ Ingest BEIR corpus into Vertex AI Search.
 Document IDs are set to the BEIR doc_id and are preserved verbatim,
 so no id_map is needed at query time.
 """
+import concurrent.futures
 import json
 from google.api_core.client_options import ClientOptions
 from google.cloud import discoveryengine_v1 as discoveryengine
@@ -86,8 +87,8 @@ def get_or_create_engine():
             raise
 
 
-def ingest(corpus: dict):
-    """Import all docs using inline batches of 100."""
+def ingest(corpus: dict, max_workers: int = 8):
+    """Import all docs using inline batches of 100, submitted concurrently."""
     client = discoveryengine.DocumentServiceClient(client_options=_client_options())
     parent = client.branch_path(
         project=config.PROJECT_ID,
@@ -98,9 +99,9 @@ def ingest(corpus: dict):
 
     docs = list(corpus.items())
     batch_size = 100
-    batches = range(0, len(docs), batch_size)
+    batch_starts = list(range(0, len(docs), batch_size))
 
-    for i in tqdm(batches, desc="  Importing batches"):
+    def _import_batch(i):
         batch = docs[i : i + batch_size]
         inline_documents = [
             discoveryengine.Document(
@@ -121,3 +122,9 @@ def ingest(corpus: dict):
             )
         )
         operation.result(timeout=120)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_import_batch, i) for i in batch_starts]
+        for _ in tqdm(concurrent.futures.as_completed(futures),
+                      total=len(futures), desc="  Importing batches"):
+            pass
