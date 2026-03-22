@@ -32,7 +32,7 @@ def get_or_create_data_store() -> str:
         display_name="BEIR SciFact Store",
         industry_vertical=discoveryengine.IndustryVertical.GENERIC,
         solution_types=[discoveryengine.SolutionType.SOLUTION_TYPE_SEARCH],
-        content_config=discoveryengine.DataStore.ContentConfig.CONTENT_REQUIRED,
+        content_config=discoveryengine.DataStore.ContentConfig.NO_CONTENT,
     )
     try:
         operation = client.create_data_store(
