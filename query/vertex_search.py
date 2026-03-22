@@ -24,7 +24,7 @@ def _client_options():
     return ClientOptions(api_endpoint=endpoint)
 
 
-def run_queries(queries: dict, top_k: int = 10, max_workers: int = 8) -> tuple:
+def run_queries(queries: dict, top_k: int = 10, max_workers: int = 1) -> tuple:
     """
     Args:
         queries:     {query_id: query_text}
@@ -48,17 +48,18 @@ def run_queries(queries: dict, top_k: int = 10, max_workers: int = 8) -> tuple:
             query=query_text,
             page_size=top_k,
         )
-        # Retry on quota errors with exponential backoff
-        delay = 2.0
-        for attempt in range(6):
+        # Retry on quota errors with exponential backoff (max ~60s total wait)
+        delay = 5.0
+        for attempt in range(4):
             try:
                 t0 = time.perf_counter()
                 search_results = list(client.search(request))
                 latency = time.perf_counter() - t0
                 break
             except ResourceExhausted:
-                if attempt == 5:
-                    raise
+                if attempt == 3:
+                    # Give up on quota — return empty result for this query
+                    return query_id, {}, 0.0
                 time.sleep(delay)
                 delay *= 2
 

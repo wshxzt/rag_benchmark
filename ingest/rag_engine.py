@@ -47,69 +47,75 @@ def ingest(corpus_name: str, corpus: dict) -> dict:
 
 
 def _ingest_via_gcs(corpus_name: str, corpus: dict, bucket_name: str) -> dict:
-    """Stage docs to GCS, then import_files in one LRO. Fast for large corpora."""
+    """Stage docs to GCS subdirectories (≤9000 each), then import_files per subdirectory.
+
+    Constraints:
+      - import_files directory import: ≤10,000 files per directory
+      - import_files individual URIs: ≤25 URIs per call
+    Solution: upload to batch_N/ subdirs, import each dir with one call.
+    """
+    import time
     from google.cloud import storage
 
     client = storage.Client(project=config.PROJECT_ID)
     bucket = client.bucket(bucket_name)
-    gcs_prefix = f"rag_benchmark/{config.BEIR_DATASET}"
+    base_prefix = f"rag_benchmark/{config.BEIR_DATASET}"
 
-    # Check how many files already exist in GCS to skip re-uploading
-    existing = {b.name for b in bucket.list_blobs(prefix=gcs_prefix)}
-    to_upload = {
-        doc_id: doc for doc_id, doc in corpus.items()
-        if f"{gcs_prefix}/{doc_id}.txt" not in existing
-    }
-    print(f"  Staging {len(to_upload)}/{len(corpus)} docs to gs://{bucket_name}/{gcs_prefix}/ ({len(existing)} already exist)")
+    BATCH_SIZE = 9000
+    docs_list = list(corpus.items())
+    n_batches = (len(docs_list) - 1) // BATCH_SIZE + 1
+    print(f"  Uploading {len(docs_list)} docs in {n_batches} subdirectory batch(es) of ≤{BATCH_SIZE} ...")
 
-    def _upload_one(item):
-        doc_id, doc = item
-        content = f"{doc.get('title', '')}\n\n{doc['text']}"
-        bucket.blob(f"{gcs_prefix}/{doc_id}.txt").upload_from_string(
-            content, content_type="text/plain"
-        )
+    id_map = {}
+    for batch_idx in range(n_batches):
+        batch_docs = docs_list[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
+        batch_prefix = f"{base_prefix}/batch_{batch_idx}"
+        batch_gcs_uri = f"gs://{bucket_name}/{batch_prefix}"
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
-        futures = [executor.submit(_upload_one, item) for item in to_upload.items()]
-        for _ in tqdm(concurrent.futures.as_completed(futures),
-                      total=len(futures), desc="  GCS upload"):
-            pass
+        existing = {b.name for b in bucket.list_blobs(prefix=batch_prefix)}
+        to_upload = {
+            doc_id: doc for doc_id, doc in batch_docs
+            if f"{batch_prefix}/{doc_id}.txt" not in existing
+        }
+        print(f"  Batch {batch_idx+1}/{n_batches}: {len(to_upload)} to upload, {len(existing)} already exist")
 
-    # import_files is limited to 10,000 files per call — batch into chunks of 9,000
-    BATCH_LIMIT = 9000
-    all_blobs = sorted(
-        b.name for b in bucket.list_blobs(prefix=gcs_prefix) if b.name.endswith(".txt")
-    )
-    total_batches = (len(all_blobs) - 1) // BATCH_LIMIT + 1
-    print(f"  Importing {len(all_blobs)} files in {total_batches} batch(es) of ≤{BATCH_LIMIT} ...")
-    for i in range(0, len(all_blobs), BATCH_LIMIT):
-        batch_uris = [f"gs://{bucket_name}/{b}" for b in all_blobs[i:i + BATCH_LIMIT]]
-        batch_num = i // BATCH_LIMIT + 1
-        print(f"  Batch {batch_num}/{total_batches}: {len(batch_uris)} files ...")
+        def _upload_one(item, _prefix=batch_prefix):
+            doc_id, doc = item
+            content = f"{doc.get('title', '')}\n\n{doc['text']}"
+            bucket.blob(f"{_prefix}/{doc_id}.txt").upload_from_string(
+                content, content_type="text/plain"
+            )
+
+        if to_upload:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+                futures = [executor.submit(_upload_one, item) for item in to_upload.items()]
+                for _ in tqdm(concurrent.futures.as_completed(futures),
+                              total=len(futures), desc=f"  Batch {batch_idx+1} upload"):
+                    pass
+
+        # Import this subdirectory (single directory URI, under the 10k-file limit)
+        print(f"  Importing batch {batch_idx+1}/{n_batches} from {batch_gcs_uri} ...")
         for attempt in range(3):
             try:
-                import time
                 response = rag.import_files(
                     corpus_name=corpus_name,
-                    paths=batch_uris,
+                    paths=[batch_gcs_uri],
                     chunk_size=512,
                     chunk_overlap=50,
                     timeout=600,
                 )
-                print(f"  Batch {batch_num} complete: {response}")
+                print(f"  Batch {batch_idx+1} imported: {response}")
                 break
             except Exception as e:
                 if attempt < 2:
-                    print(f"  import_files batch {batch_num} attempt {attempt+1} failed: {e}. Retrying...")
+                    print(f"  Batch {batch_idx+1} attempt {attempt+1} failed: {e}. Retrying...")
                     time.sleep(10)
                 else:
                     raise
 
-    # Build id_map from GCS URI -> doc_id (doc_id is the filename stem)
-    id_map = {}
-    for doc_id in corpus:
-        uri = f"gs://{bucket_name}/{gcs_prefix}/{doc_id}.txt"
-        id_map[uri] = doc_id
+        for doc_id, _ in batch_docs:
+            id_map[f"{batch_gcs_uri}/{doc_id}.txt"] = doc_id
+
     return id_map
 
 
