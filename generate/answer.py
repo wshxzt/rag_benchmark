@@ -95,8 +95,8 @@ def generate_answers(
                 delay *= 2
 
     # Seed answers from checkpoint; only submit pending queries
-    answers: dict[str, str] = checkpoint.data() if checkpoint else {}
-    pending = [qid for qid in queries if not (checkpoint and checkpoint.done(qid))]
+    answers: dict[str, str] = checkpoint.data() if checkpoint is not None else {}
+    pending = [qid for qid in queries if not (checkpoint is not None and checkpoint.done(qid))]
 
     if not pending:
         return answers
@@ -110,7 +110,7 @@ def generate_answers(
         ):
             query_id, answer = future.result()
             answers[query_id] = answer
-            if checkpoint:
+            if checkpoint is not None:
                 checkpoint.record(query_id, answer)
 
     return answers

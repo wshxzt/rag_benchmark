@@ -123,8 +123,8 @@ def rate_answers(
                 delay *= 2
 
     # Seed ratings from checkpoint; only submit pending queries
-    ratings: dict[str, dict] = checkpoint.data() if checkpoint else {}
-    pending = [qid for qid in queries if not (checkpoint and checkpoint.done(qid))]
+    ratings: dict[str, dict] = checkpoint.data() if checkpoint is not None else {}
+    pending = [qid for qid in queries if not (checkpoint is not None and checkpoint.done(qid))]
 
     if not pending:
         return ratings
@@ -138,7 +138,7 @@ def rate_answers(
         ):
             query_id, scores = future.result()
             ratings[query_id] = scores
-            if checkpoint:
+            if checkpoint is not None:
                 checkpoint.record(query_id, scores)
 
     return ratings

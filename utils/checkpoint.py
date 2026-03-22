@@ -32,3 +32,6 @@ class Checkpoint:
 
     def __len__(self) -> int:
         return len(self._data)
+
+    def __bool__(self) -> bool:
+        return True
