@@ -48,7 +48,7 @@ Respond with exactly this JSON (fill in the integers):
 {{"faithfulness": <1-5>, "relevance": <1-5>}}\
 """
 
-RATING_CONFIG = GenerationConfig(temperature=0.0, max_output_tokens=64)
+RATING_CONFIG = GenerationConfig(temperature=0.0, max_output_tokens=1024)
 
 
 def _build_context(results: dict, corpus: dict, max_docs: int) -> str:
